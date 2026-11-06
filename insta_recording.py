@@ -1,7 +1,7 @@
 """Insta-recording: record a dragged screen area and export it as a 9:16 Instagram Reel.
 
 Pipeline:
-  1. Drag a rectangle over the screen.
+  1. Drag a rectangle over the screen, or pick the whole screen.
   2. After a 3-2-1-0 countdown, ffmpeg records that region losslessly (GPU Desktop
      Duplication + NVENC when available, falling back to CPU encoders / gdigrab) while
      system audio is captured via WASAPI loopback.
@@ -27,7 +27,7 @@ import urllib.request
 from tkinter import filedialog, messagebox, ttk
 
 APP_NAME = "Insta-recording"
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.0"
 GITHUB_REPO = "Futurehouser/Insta-recording"
 RELEASES_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 UPDATE_ASSET = f"{APP_NAME}.exe"
@@ -55,6 +55,7 @@ except Exception:
         pass
 
 user32 = ctypes.windll.user32
+user32.MonitorFromWindow.restype = ctypes.c_void_p
 
 
 def resource_path(name):
@@ -77,6 +78,21 @@ def virtual_screen():
     """Bounding box of all monitors: (x, y, w, h)."""
     return (user32.GetSystemMetrics(76), user32.GetSystemMetrics(77),
             user32.GetSystemMetrics(78), user32.GetSystemMetrics(79))
+
+
+class _MONITORINFO(ctypes.Structure):
+    _fields_ = [("cbSize", ctypes.c_uint32), ("rcMonitor", ctypes.c_long * 4),
+                ("rcWork", ctypes.c_long * 4), ("dwFlags", ctypes.c_uint32)]
+
+
+def monitor_region(win):
+    """The (x, y, w, h) of the monitor a Tk window is on, with even dimensions."""
+    hwnd = user32.GetAncestor(win.winfo_id(), 2)  # GA_ROOT
+    monitor = ctypes.c_void_p(user32.MonitorFromWindow(hwnd, 2))  # MONITOR_DEFAULTTONEAREST
+    info = _MONITORINFO(cbSize=ctypes.sizeof(_MONITORINFO))
+    user32.GetMonitorInfoW(monitor, ctypes.byref(info))
+    left, top, right, bottom = info.rcMonitor
+    return left, top, (right - left) & ~1, (bottom - top) & ~1
 
 
 def exclude_from_capture(win):
@@ -608,9 +624,15 @@ class App(tk.Tk):
         ttk.Entry(root, textvariable=self.out_dir, width=42).grid(row=6, column=1, sticky="we", pady=3)
         ttk.Button(root, text="Browse…", command=self._browse).grid(row=6, column=2, padx=(6, 0))
 
-        self.rec_btn = ttk.Button(root, text="●  Select area & record", style="Big.TButton",
+        buttons = ttk.Frame(root)
+        buttons.grid(row=8, column=0, columnspan=3, sticky="we", pady=(14, 8))
+        buttons.columnconfigure((0, 1), weight=1, uniform="record")
+        self.rec_btn = ttk.Button(buttons, text="●  Select area", style="Big.TButton",
                                   command=self.select_area)
-        self.rec_btn.grid(row=8, column=0, columnspan=3, sticky="we", pady=(14, 8))
+        self.rec_btn.grid(row=0, column=0, sticky="we", padx=(0, 4))
+        self.full_btn = ttk.Button(buttons, text="▣  Full screen", style="Big.TButton",
+                                   command=self.record_full_screen)
+        self.full_btn.grid(row=0, column=1, sticky="we", padx=(4, 0))
 
         self.bar = ttk.Progressbar(root, mode="determinate", maximum=100)
         self.bar.grid(row=9, column=0, columnspan=3, sticky="we")
@@ -636,6 +658,10 @@ class App(tk.Tk):
         self.update_bar.grid_remove()
         root.columnconfigure(1, weight=1)
 
+    def _set_busy(self, busy):
+        for btn in (self.rec_btn, self.full_btn):
+            btn.state(["disabled" if busy else "!disabled"])
+
     def _save_settings(self):
         save_settings({"fps": self.fps.get(), "cursor": self.cursor.get(),
                        "audio": self.record_audio.get(), "limit_59": self.limit_59.get(),
@@ -657,6 +683,11 @@ class App(tk.Tk):
     def select_area(self):
         self.withdraw()
         self.after(250, lambda: AreaSelector(self, self._area_selected))
+
+    def record_full_screen(self):
+        region = monitor_region(self)
+        self.withdraw()
+        self.after(250, lambda: self._area_selected(region))
 
     def _area_selected(self, region):
         if region is None:
@@ -839,7 +870,7 @@ class App(tk.Tk):
         self.rec_duration = time.time() - self.rec_start
         at_limit = self.rec_limited and self.rec_duration >= LIMIT_SECONDS
         self._teardown_recording_ui()
-        self.rec_btn.state(["disabled"])
+        self._set_busy(True)
         self.finish_result = None
         self.finishing = FinishingDialog(self)
         # Waiting for ffmpeg and the audio stream can take seconds, so keep it off the UI thread.
@@ -883,7 +914,7 @@ class App(tk.Tk):
         self.lift()
         captured, duration = self.finish_result
         if not captured:
-            self.rec_btn.state(["!disabled"])
+            self._set_busy(False)
             self.status.set("Recording failed — no video was captured.")
             return
         self.start_export(duration)
@@ -936,13 +967,13 @@ class App(tk.Tk):
         try:
             os.makedirs(out_dir, exist_ok=True)
         except OSError as exc:
-            self.rec_btn.state(["!disabled"])
+            self._set_busy(False)
             self.status.set("Export failed. The raw recording was kept in the temp folder.")
             messagebox.showerror(APP_NAME, f"Can't use the folder {out_dir}:\n\n{exc}")
             return
         stamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         dst = os.path.join(out_dir, f"{APP_NAME}_{stamp}.mp4")
-        self.rec_btn.state(["disabled"])
+        self._set_busy(True)
         self.progress_value = 0.0
         self.export_result = None
         self.status.set("Converting to 9:16 for Reels…")
@@ -994,7 +1025,7 @@ class App(tk.Tk):
             self.status.set(f"Converting to 9:16 for Reels… {self.progress_value:.0f}%")
             self.after(200, self._poll_export)
             return
-        self.rec_btn.state(["!disabled"])
+        self._set_busy(False)
         kind, info = self.export_result
         if kind == "ok":
             self.bar["value"] = 100
@@ -1051,7 +1082,7 @@ class App(tk.Tk):
         self.updating = True
         self.update_result = None
         self.progress_value = 0.0
-        self.rec_btn.state(["disabled"])
+        self._set_busy(True)
         self.install_btn.state(["disabled"])
         self.check_btn.state(["disabled"])
         threading.Thread(target=self._update_worker, daemon=True).start()
@@ -1079,7 +1110,7 @@ class App(tk.Tk):
             return
         self.updating = False
         self.bar["value"] = 0
-        self.rec_btn.state(["!disabled"])
+        self._set_busy(False)
         self.install_btn.state(["!disabled"])
         self.check_btn.state(["!disabled"])
         self.status.set("The update failed; your current version still works.")

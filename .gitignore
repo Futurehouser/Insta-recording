@@ -4,3 +4,10 @@ __pycache__/
 *.mkv
 *.mp4
 *.spec
+android/keystore/
+android/keystore.properties
+android/local.properties
+android/.gradle/
+android/app/build/
+android/build/
+*.apk

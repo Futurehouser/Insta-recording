@@ -1,0 +1,56 @@
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+}
+
+def keystoreProps = rootProject.file('keystore.properties')
+
+android {
+    namespace 'com.futurehouser.instarecording'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'com.futurehouser.instarecording'
+        minSdk 29      // first version with system audio capture
+        targetSdk 34
+        // testVersion builds an older-looking app for trying out the updater.
+        def testVersion = project.findProperty('testVersion')
+        versionCode testVersion ? 1 : 10200
+        versionName testVersion ?: '1.2.0'
+
+        def releasesApi = project.findProperty('releasesApi')
+                ?: 'https://api.github.com/repos/Futurehouser/Insta-recording/releases/latest'
+        buildConfigField 'String', 'RELEASES_API', "\"${releasesApi}\""
+    }
+
+    buildFeatures {
+        buildConfig true
+    }
+
+    signingConfigs {
+        if (keystoreProps.exists()) {
+            release {
+                def props = new Properties()
+                keystoreProps.withInputStream { props.load(it) }
+                storeFile rootProject.file(props['storeFile'])
+                storePassword props['storePassword']
+                keyAlias props['keyAlias']
+                keyPassword props['keyPassword']
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            signingConfig keystoreProps.exists() ? signingConfigs.release : signingConfigs.debug
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    kotlinOptions {
+        jvmTarget = '17'
+    }
+}
