@@ -7,8 +7,6 @@ Portable Windows app that records any area of your screen and turns it into a 10
 - Drag to choose the area, then a 3-2-1-0 countdown
 - System audio recording (not the microphone)
 - Optional 59-second limit
-- Keep or discard each take before it is converted
-- Optional automatic copy to a Google Drive for desktop folder
 - Built-in updates from GitHub Releases
 
 ## Download

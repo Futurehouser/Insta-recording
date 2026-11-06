@@ -13,12 +13,10 @@ its own exe with it.
 """
 import ctypes
 import datetime
-import glob
 import hashlib
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -29,7 +27,7 @@ import urllib.request
 from tkinter import filedialog, messagebox, ttk
 
 APP_NAME = "Insta-recording"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 GITHUB_REPO = "Futurehouser/Insta-recording"
 RELEASES_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 UPDATE_ASSET = f"{APP_NAME}.exe"
@@ -289,54 +287,6 @@ def save_settings(data):
         pass
 
 
-def google_drive_roots():
-    """Drive letters mounted by Google Drive for desktop (volume label 'Google Drive')."""
-    roots = []
-    buf = ctypes.create_unicode_buffer(261)
-    for letter in "DEFGHIJKLMNOPQRSTUVWXYZ":
-        root = f"{letter}:\\"
-        if ctypes.windll.kernel32.GetVolumeInformationW(root, buf, 261, None, None, None,
-                                                        None, 0) and buf.value == "Google Drive":
-            roots.append(root)
-    return roots
-
-
-def google_drive_exe():
-    try:
-        import winreg
-        key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"Software\Microsoft\Windows\CurrentVersion"
-                             r"\Uninstall\{6BBAE539-2232-434A-A4E5-9A33560C6283}")
-        path = winreg.QueryValueEx(key, "InstallLocation")[0]
-        if path.lower().endswith("googledrivefs.exe") and os.path.exists(path):
-            return path
-    except OSError:
-        pass
-    pf = os.environ.get("ProgramFiles", r"C:\Program Files")
-    found = glob.glob(os.path.join(pf, "Google", "Drive File Stream", "*", "GoogleDriveFS.exe"))
-    key = lambda p: [int(x) if x.isdigit() else 0 for x in os.path.basename(os.path.dirname(p)).split(".")]
-    return max(found, key=key) if found else None
-
-
-def start_google_drive():
-    """Launch Drive for desktop if it isn't mounted. Returns True if it was launched."""
-    if google_drive_roots():
-        return False
-    exe = google_drive_exe()
-    if not exe:
-        return False
-    subprocess.Popen([exe], creationflags=CREATE_NO_WINDOW, close_fds=True)
-    return True
-
-
-def wait_for_path(path, timeout):
-    end = time.time() + timeout
-    while time.time() < end:
-        if os.path.isdir(path):
-            return True
-        time.sleep(1)
-    return os.path.isdir(path)
-
-
 def version_tuple(version):
     return tuple(int(n) for n in re.findall(r"\d+", version)[:3])
 
@@ -556,7 +506,7 @@ class Countdown(tk.Toplevel):
 
 
 class FinishingDialog(tk.Toplevel):
-    """Shown from the moment recording ends until the keep-or-discard question is ready."""
+    """Shown from the moment recording ends until the video starts converting."""
 
     def __init__(self, master):
         super().__init__(master)
@@ -580,48 +530,6 @@ class FinishingDialog(tk.Toplevel):
         self.update()
 
 
-class KeepDialog(tk.Toplevel):
-    """Asked after every recording: export it, throw it away, or throw it away and redo."""
-
-    def __init__(self, master, duration, on_choice):
-        super().__init__(master)
-        self.on_choice = on_choice
-        self.title(APP_NAME)
-        self.resizable(False, False)
-        self.transient(master)
-        self.attributes("-topmost", True)
-        # Force an explicit choice: closing the window would otherwise lose the recording.
-        self.protocol("WM_DELETE_WINDOW", lambda: None)
-        body = ttk.Frame(self, padding=18)
-        body.pack()
-        ttk.Label(body, text="Keep this recording?", font=("Segoe UI", 13, "bold")).pack(anchor="w")
-        ttk.Label(body, text=f"Length: {fmt_time(duration)}", foreground="#666").pack(
-            anchor="w", pady=(2, 14))
-        buttons = ttk.Frame(body)
-        buttons.pack(fill="x")
-        save = ttk.Button(buttons, text="✔  Save video", command=lambda: self._choose("save"))
-        save.pack(side="left")
-        ttk.Button(buttons, text="↻  Discard & record again",
-                   command=lambda: self._choose("again")).pack(side="left", padx=8)
-        ttk.Button(buttons, text="✖  Discard", command=lambda: self._choose("discard")).pack(side="left")
-        ttk.Label(body, text="Enter = save   ·   R = record again   ·   Esc = discard",
-                  foreground="#888").pack(anchor="w", pady=(12, 0))
-        self.bind("<Return>", lambda e: self._choose("save"))
-        self.bind("<Key-r>", lambda e: self._choose("again"))
-        self.bind("<Escape>", lambda e: self._choose("discard"))
-        self.update_idletasks()
-        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
-        self.geometry(f"+{(sw - self.winfo_reqwidth()) // 2}+{(sh - self.winfo_reqheight()) // 3}")
-        self.grab_set()
-        self.focus_force()
-        save.focus_set()
-
-    def _choose(self, choice):
-        self.grab_release()
-        self.destroy()
-        self.on_choice(choice)
-
-
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -638,15 +546,12 @@ class App(tk.Tk):
         self.cursor = tk.BooleanVar(value=s.get("cursor", True))
         self.record_audio = tk.BooleanVar(value=s.get("audio", True))
         self.limit_59 = tk.BooleanVar(value=s.get("limit_59", False))
-        self.drive_enabled = tk.BooleanVar(value=s.get("drive_enabled", False))
-        self.drive_dir = tk.StringVar(value=s.get("drive_dir", ""))
         self.audio = None
         self.audio_warning = None
         self.rec_limited = False
         default_out = os.path.join(os.path.expanduser("~"), "Videos", APP_NAME)
         self.out_dir = tk.StringVar(value=s.get("out_dir", default_out))
-        for var in (self.fps, self.cursor, self.record_audio, self.limit_59,
-                    self.drive_enabled, self.drive_dir, self.out_dir):
+        for var in (self.fps, self.cursor, self.record_audio, self.limit_59, self.out_dir):
             var.trace_add("write", lambda *a: self._save_settings())
         self.status = tk.StringVar(value="Ready. Click the button and drag over the area to record.")
         self.proc = None
@@ -703,16 +608,6 @@ class App(tk.Tk):
         ttk.Entry(root, textvariable=self.out_dir, width=42).grid(row=6, column=1, sticky="we", pady=3)
         ttk.Button(root, text="Browse…", command=self._browse).grid(row=6, column=2, padx=(6, 0))
 
-        drive = ttk.LabelFrame(root, text="Google Drive", padding=(10, 6))
-        drive.grid(row=7, column=0, columnspan=3, sticky="we", pady=(10, 0))
-        ttk.Checkbutton(drive, text="Also copy every recording to this Google Drive folder:",
-                        variable=self.drive_enabled).grid(row=0, column=0, columnspan=2, sticky="w")
-        ttk.Entry(drive, textvariable=self.drive_dir, state="readonly").grid(
-            row=1, column=0, sticky="we", pady=3)
-        ttk.Button(drive, text="Choose…", command=self._choose_drive_folder).grid(
-            row=1, column=1, padx=(6, 0))
-        drive.columnconfigure(0, weight=1)
-
         self.rec_btn = ttk.Button(root, text="●  Select area & record", style="Big.TButton",
                                   command=self.select_area)
         self.rec_btn.grid(row=8, column=0, columnspan=3, sticky="we", pady=(14, 8))
@@ -744,45 +639,12 @@ class App(tk.Tk):
     def _save_settings(self):
         save_settings({"fps": self.fps.get(), "cursor": self.cursor.get(),
                        "audio": self.record_audio.get(), "limit_59": self.limit_59.get(),
-                       "drive_enabled": self.drive_enabled.get(), "drive_dir": self.drive_dir.get(),
                        "out_dir": self.out_dir.get()})
 
     def _browse(self):
         d = filedialog.askdirectory(initialdir=self.out_dir.get() or os.path.expanduser("~"))
         if d:
             self.out_dir.set(d)
-
-    def _choose_drive_folder(self):
-        roots = google_drive_roots()
-        if not roots and start_google_drive():
-            self.status.set("Starting Google Drive…")
-            self.config(cursor="watch")
-            self.update()
-            end = time.time() + 45
-            while not roots and time.time() < end:
-                self.update()
-                time.sleep(0.5)
-                roots = google_drive_roots()
-            self.config(cursor="")
-            self.status.set("Ready." if roots else "Google Drive didn't appear.")
-        if not roots:
-            if not messagebox.askyesno(
-                    APP_NAME, "Google Drive for desktop isn't running or isn't signed in, so no "
-                    "Drive folder was found.\n\nChoose a folder anyway?"):
-                return
-        current = self.drive_dir.get()
-        initial = current if os.path.isdir(current) else (roots[0] if roots else None)
-        d = filedialog.askdirectory(title="Choose the Google Drive folder for your recordings",
-                                    initialdir=initial)
-        if not d:
-            return
-        d = os.path.normpath(d)
-        if roots and not any(d.upper().startswith(r.upper()) for r in roots):
-            if not messagebox.askyesno(APP_NAME, f"{d}\n\nisn't inside Google Drive ({', '.join(roots)}). "
-                                       "Use it anyway?"):
-                return
-        self.drive_dir.set(d)
-        self.drive_enabled.set(True)
 
     def _open_folder(self):
         if self.last_output and os.path.exists(self.last_output):
@@ -1017,35 +879,14 @@ class App(tk.Tk):
             return
         self.finishing.destroy()
         self.finishing = None
-        self.rec_btn.state(["!disabled"])
         self.deiconify()
         self.lift()
         captured, duration = self.finish_result
         if not captured:
+            self.rec_btn.state(["!disabled"])
             self.status.set("Recording failed — no video was captured.")
             return
-        KeepDialog(self, duration, self._keep_choice)
-
-    def _keep_choice(self, choice):
-        if choice == "save":
-            self.start_export()
-            return
-        self._discard_recording()
-        if choice == "again":
-            self.select_area()
-        else:
-            self.status.set("Recording discarded.")
-
-    def _discard_recording(self):
-        files = [self.raw_path, self.log_path, self.audio.path if self.audio else None]
-        self.audio = None
-        for f in files:
-            if f:
-                try:
-                    os.remove(f)
-                except OSError:
-                    pass
-        self.bar["value"] = 0
+        self.start_export(duration)
 
     # ---------- Export ----------
     def build_export_cmd(self, src, dst, fps, audio=None, duration=None):
@@ -1090,18 +931,21 @@ class App(tk.Tk):
                 "-movflags", "+faststart",
                 "-progress", "pipe:1", "-nostats", dst]
 
-    def start_export(self):
+    def start_export(self, duration):
         out_dir = self.out_dir.get()
-        os.makedirs(out_dir, exist_ok=True)
+        try:
+            os.makedirs(out_dir, exist_ok=True)
+        except OSError as exc:
+            self.rec_btn.state(["!disabled"])
+            self.status.set("Export failed. The raw recording was kept in the temp folder.")
+            messagebox.showerror(APP_NAME, f"Can't use the folder {out_dir}:\n\n{exc}")
+            return
         stamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         dst = os.path.join(out_dir, f"{APP_NAME}_{stamp}.mp4")
         self.rec_btn.state(["disabled"])
         self.progress_value = 0.0
         self.export_result = None
-        self.export_stage = None
-        drive_dir = self.drive_dir.get() if self.drive_enabled.get() else ""
         self.status.set("Converting to 9:16 for Reels…")
-        duration = media_duration(self.ffmpeg, self.raw_path) or self.rec_duration
         self.rec_duration = duration
         audio = None
         if self.audio and self.audio.written > 0:
@@ -1109,11 +953,11 @@ class App(tk.Tk):
             audio = (self.audio.path, self.audio.rate, self.audio.channels, offset)
         self.audio = None
         threading.Thread(target=self._export_worker,
-                         args=(self.raw_path, dst, self.rec_fps, audio, duration, drive_dir),
+                         args=(self.raw_path, dst, self.rec_fps, audio, duration),
                          daemon=True).start()
         self._poll_export()
 
-    def _export_worker(self, src, dst, fps, audio, duration, drive_dir):
+    def _export_worker(self, src, dst, fps, audio, duration):
         log_path = src + ".export.log"
         try:
             with open(log_path, "w", encoding="utf-8", errors="replace") as log:
@@ -1137,50 +981,25 @@ class App(tk.Tk):
                         os.remove(f)
                     except OSError:
                         pass
-                drive_msg = self._copy_to_drive(dst, drive_dir) if drive_dir else None
-                self.export_result = ("ok", dst, drive_msg)
+                self.export_result = ("ok", dst)
             else:
                 with open(log_path, encoding="utf-8", errors="replace") as f:
-                    self.export_result = ("error", f.read()[-1500:], None)
+                    self.export_result = ("error", f.read()[-1500:])
         except Exception as exc:
-            self.export_result = ("error", str(exc), None)
-
-    def _copy_to_drive(self, src, drive_dir):
-        """Copy the finished MP4 into the Google Drive folder; returns a status line."""
-        self.export_stage = "Copying to Google Drive…"
-        if not os.path.isdir(drive_dir):
-            if start_google_drive():
-                self.export_stage = "Starting Google Drive…"
-            if not wait_for_path(drive_dir, 60):
-                return (f"⚠ Google Drive folder not available ({drive_dir}). Is Google Drive "
-                        "running and signed in? The video is still saved locally.")
-            self.export_stage = "Copying to Google Drive…"
-        try:
-            dst = os.path.join(drive_dir, os.path.basename(src))
-            # Copy under a temporary name so Drive never syncs a half-written file.
-            shutil.copyfile(src, dst + ".part")
-            os.replace(dst + ".part", dst)
-            return "✔ Copied to Google Drive — it will appear in Drive once synced."
-        except OSError as exc:
-            return f"⚠ Couldn't copy to Google Drive: {exc}. The video is still saved locally."
+            self.export_result = ("error", str(exc))
 
     def _poll_export(self):
         self.bar["value"] = self.progress_value
         if self.export_result is None:
-            if self.export_stage:
-                self.status.set(self.export_stage)
-            else:
-                self.status.set(f"Converting to 9:16 for Reels… {self.progress_value:.0f}%")
+            self.status.set(f"Converting to 9:16 for Reels… {self.progress_value:.0f}%")
             self.after(200, self._poll_export)
             return
         self.rec_btn.state(["!disabled"])
-        kind, info, drive_msg = self.export_result
+        kind, info = self.export_result
         if kind == "ok":
             self.bar["value"] = 100
             self.last_output = info
             msg = f"Done! Saved {os.path.basename(info)}"
-            if drive_msg:
-                msg += "\n" + drive_msg
             if self.audio_warning:
                 msg += "\n" + self.audio_warning
             self.status.set(msg)
